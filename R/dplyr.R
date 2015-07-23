@@ -87,6 +87,69 @@ head.tbl_sqlserver <- function (x, n = 6L, ...) {
   build_query(x, n)$fetch()
 }
 
+#' @export
+sql_join.SQLServerConnection <- function (con, x, y, type = "inner", by = NULL, ...) {
+  join <- switch(type, left = sql("LEFT"), inner = sql("INNER"), 
+                 right = sql("RIGHT"), full = sql("FULL"), stop("Unknown join type:", 
+                                                                type, call. = FALSE))
+  by <- dplyr:::common_by(by, x, y)
+  using <- FALSE # all(by$x == by$y)
+  x_names <- dplyr:::auto_names(x$select)
+  y_names <- dplyr:::auto_names(y$select)
+  
+  uniques <- dplyr:::unique_names(x_names, y_names, by$x[by$x == by$y])
+  if (is.null(uniques)) {
+    sel_vars <- unique(c(x_names, y_names))
+  } else {
+    x <- update(x, select = setNames(x$select, uniques$x))
+    y <- update(y, select = setNames(y$select, uniques$y))
+    by$x <- unname(uniques$x[by$x])
+    by$y <- unname(uniques$y[by$y])
+    sel_vars <- unique(c(uniques$x, uniques$y))
+  }
+  t_name_x <- dplyr:::unique_name()
+  t_name_y <- dplyr:::unique_name()
+  sel_tbl <- rep(t_name_y, length(sel_vars))
+  sel_tbl[sel_vars %in% dplyr:::auto_names(x$select)] <- t_name_x
+  if (type == "right") {
+    sel_tbl[sel_vars %in% by$y] <- t_name_y
+  }
+  sel_qual <- paste0(sql_escape_ident(con, sel_tbl), ".",
+                     sql_escape_ident(con, sel_vars))
+  by_shared <- by$x[by$x %in% by$y]
+  # This ensures that columns used in by with a name common to both tables
+  # will always have a value
+  if (length(by_shared) > 0L) {
+    sel_qual[sel_vars %in% by_shared] <-
+      vapply(sel_vars[sel_vars %in% by_shared], function(var) {
+        paste0("COALESCE(", paste(sql_escape_ident(con, c(t_name_x, t_name_y)),
+                                  sql_escape_ident(con, var),
+                                  sep = ".",
+                                  collapse = ", "),
+                ") AS ", sql_escape_ident(con, var))
+        },
+        "")
+  }
+  sel_sql <- sql_vector(sel_qual, collapse = ", ", parens = FALSE)
+  if (using) {
+    cond <- build_sql("USING ", lapply(by$x, ident), con = con)
+  } else {
+    on <- sql_vector(paste0(sql_escape_ident(con, t_name_x), ".",
+                            sql_escape_ident(con, by$x), 
+                            " = ",
+                            sql_escape_ident(con, t_name_y), ".",
+                            sql_escape_ident(con, by$y)),
+                     collapse = " AND ", 
+                     parens = TRUE)
+    cond <- build_sql("ON ", on, con = con)
+  }
+                    
+  from <- build_sql("SELECT ", sel_sql, " FROM ", sql_subquery(con, x$query$sql, t_name_x), 
+                    "\n\n", join, " JOIN \n\n", sql_subquery(con, y$query$sql, t_name_y), 
+                    "\n\n", cond, con = con)
+  attr(from, "vars") <- lapply(sel_vars, as.name)
+  from
+}
 
 #
 # #' @importFrom dplyr compute
